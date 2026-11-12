@@ -1,0 +1,95 @@
+\section{Edit parameters and builders}
+\label{app:params}
+Table~\ref{tab:params} lists the per-layer quantities of the always-on explore-more edit of \S\ref{sec:devgain}. They come from the build reports of our first builder (\texttt{neuron\_report.json}). At strength 1.0 the cap $\beta = 0.6$ applies at layer 22, so Eq.~(\ref{eq:shift}) predicts 0.84 class gaps there, not 1.0. The benchmark authors ran their own builders with their own quiet-neuron scores, and their neuron choices differ. At layers 18, 20 and 22, Claude used neurons 3359, 2972 and 4698 (read-out SD 0.011--0.018), GPT used 3359, 2972 and 1052, and Gemini used 4218, 2972 and 1052.
+
+\begin{table}[h]
+\caption{Always-on explore-more edit: per-layer parameters. AUC is for the direction on 160 + 160 held-out decisions. $q \cdot \hat{x}$ is the constant read-out on held-out positions (mean $\pm$ SD). The builder records $\eta = \lVert w_{\mathrm{post}} \odot \hat{u} \rVert$ directly (\texttt{write\_eff}). $\beta$ is given for strengths 0.125, 0.25, 0.5 and 1.0.}
+\label{tab:params}
+\centering
+\small
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{rrrrrrrll}
+\toprule
+Layer & Neuron & AUC \up & $s_l$ & Class gap & $\rho$ & $\eta$ & $q \cdot \hat{x}$ & $\beta$ at four strengths \\
+\midrule
+18 & 3359 & 0.77 & 0.535 & 9.38 & 0.078 & 1.520 & $0.99 \pm 0.02$ & 0.029, 0.057, 0.115, 0.234 \\
+20 & 2972 & 0.81 & 0.439 & 11.83 & 0.067 & 2.213 & $0.98 \pm 0.04$ & 0.030, 0.060, 0.121, 0.248 \\
+22 & 1052 & 0.83 & 0.173 & 8.36 & 0.079 & 1.568 & $0.98 \pm 0.04$ & 0.077, 0.154, 0.320, 0.600 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Side effect and spread.} The normalisation of Eq.~(\ref{eq:neuron}) also shrinks the natural write by $1/\sqrt{1+\beta^2}$ (the second term of $\Delta h$ in \S\ref{sec:primitive}). The builder records this factor (\texttt{natural\_write\_scale}): 0.988--0.998 at strength 0.25, 0.952--0.994 at 0.5, and 0.858 at layer 22 at 1.0. Eq.~(\ref{eq:shift}) omits this term. The term moves the output along $d_l$ only by the shrunk fraction of the component that the natural write already has along $d_l$. The activation $a_j = \gelu(G z)\, z$ with $z = q \cdot \hat{x}$ is close to quadratic in $z$ near 1. Thus an SD of 0.02--0.04 in $z$ gives an SD of about 4--8\% in the write size across positions.
+
+\textbf{Packing.} Each edit changes one row of the gate and up projections and one column of the down projection per layer. For three layers, this is nine tensors. The builder computes the effective weights: the dequantised INT4 base plus the source adapter's update. It stores the difference between the intended and the current row or column as one extra LoRA rank, with scale $\alpha / r = 2$ kept constant. The overwrite is exact up to bf16 storage. At strength 0.25, stored rows and columns differ from the intended ones by 0.2--1.6\% in relative norm. An edit on a rank-$r$ adapter is a rank-$(r{+}1)$ adapter, so it composes with an RL adapter.
+
+\begin{algorithm}[h]
+\caption{Weight-programming loop (one iteration). Steps 1--4 run on CPU; step 5 (replay and agent evaluation) uses a GPU.}
+\label{alg:loop}
+\small
+\begin{enumerate}[leftmargin=1.8em]
+    \item \textbf{Diagnose.} Read episodes and error breakdowns of the unedited model. Compare episodes of the same task. Name one behaviour that separates solved from unsolved episodes.
+    \item \textbf{Locate.} Label logged decision points for that behaviour (e.g., the next call makes the first edit or explores further). Record activations. Compute $d_l$ on the training split. Keep the layers with high held-out AUC.
+    \item \textbf{Write.} Choose a quiet neuron per layer. Fit $q$ (and a gate, if any). Set $\beta$ from Eq.~(\ref{eq:shift}) for the chosen strength. Pack the edit as a LoRA adapter. Build the matched random control from the same neurons and norms.
+    \item \textbf{Predict.} Before any evaluation, write down the diagnosis, the mechanism, the expected change in a named decision statistic, and the expected change in solved tasks with an 80\% interval.
+    \item \textbf{Verify.} (a) \emph{Replay}: regenerate 100--320 held-out logged decisions greedily under the edit, the control and the unedited model. Compare the targeted decision. (b) \emph{Agent evaluation}: run full episodes with every arm in one batch. Pair the edit against the unedited model and the control.
+    \item \textbf{Score.} Compare the outcome with the written prediction and record a hit or a miss. Return to step 1.
+\end{enumerate}
+\end{algorithm}
+
+\begin{table}[h]
+\caption{Dose-response of three edits and their matched random controls. Replay rows are single greedy regenerations of each held-out decision ($n$ decisions); brackets are Wilson 95\% intervals. The episode row is one agent run of 170 tasks per arm (batch 5). For submit sooner, ``unedited'' is the wave-5 RL adapter on which we wrote the edit. Explore-more strengths are 0.125, 0.25 and 0.5. Its control column is the 0.5-matched control; three 0.25-matched seeds give 0.66, 0.62 and 0.64.}
+\label{tab:dose}
+\centering
+\footnotesize
+\setlength{\tabcolsep}{3pt}
+\resizebox{\linewidth}{!}{\begin{tabular}{lrrrrr}
+\toprule
+ & Unedited & \multicolumn{3}{c}{Edit strength (low, mid, high)} & Matched random \\
+\cmidrule(lr){3-5}
+Statistic & model & low & mid & high & control \\
+\midrule
+Submit rate, $n{=}100$ (submit sooner) \up & 0.15 {\scriptsize[.09,.23]} & 0.20 {\scriptsize[.13,.29]} & 0.29 {\scriptsize[.21,.39]} & 0.41 {\scriptsize[.32,.51]} & 0.15 {\scriptsize[.09,.23]} \\
+Tool calls per episode (submit sooner) \dn & 20.8 & 17.4 & 14.2 & 8.8 & 19.8 \\
+Thinking tokens per call, $n{=}320$ (think briefly) \dn & 659 & 594 & 524 & 399 & 649 \\
+First-edit rate, $n{=}320$ (explore more) \dn & 0.66 {\scriptsize[.61,.71]} & 0.61 {\scriptsize[.55,.66]} & 0.57 {\scriptsize[.51,.62]} & 0.49 {\scriptsize[.43,.54]} & 0.66 {\scriptsize[.61,.71]} \\
+\bottomrule
+\end{tabular}}
+\end{table}
+
+\subsection{The primitive without an output normalisation}
+\label{app:nonorm}
+Most open models add the MLP output directly to the residual stream, without the post-MLP RMS normalisation of Gemma 4. In these models the same neuron works with a simpler write. Let $h_{\mathrm{out}} = s_l (x + y)$, with $s_l = 1$ in models without a layer scalar. Let the neuron fire at $a_j \approx \gelu(G)$ (gate $= G q$, up $= q$, $q \cdot \hat{x} \approx 1$ as in \S\ref{sec:primitive}). Then the setting
+\begin{equation}
+\mathrm{down}_{:,j} = \frac{t\, d_l}{s_l\, \gelu(G)}
+\end{equation}
+moves the layer output along $d_l$ by $t$ class gaps wherever $q \cdot \hat{x} = 1$. Here $d_l$ is not normalised: it carries its norm $\lVert d_l \rVert$ of one class gap, unlike the unit $\hat{u}$ of Eq.~(\ref{eq:write}). This needs no orthogonality assumption, because nothing renormalises the sum. The shift is linear in the write size and does not saturate. Under the RMS normalisation of Gemma 4, the shift grows as $\beta/\sqrt{1+\beta^2}$ (Eq.~\ref{eq:shift}) and saturates. For this reason, round 5 could not reach class-gap targets of 1.2 and above at some layers (Appendix~\ref{app:round5}). We tested the primitive on Gemma 4 E4B. This derivation gives the write for other architectures; we did not test transfer.
+
+\subsection{Gated edits in the benchmark}
+\label{app:gated}
+\textbf{Claude's builder} (from its build script). All four edits and the control rewrite one neuron in each of layers 18, 20 and 22. The builder picks the neuron with the smallest product of mean absolute activation and down-column norm after the output normalisation weight. Attention projections stay at zero. The activation set has two parts, both split by episode. The first part is the 800 training decision calls before the first edit: 3,198 generated positions (the decision tokens among them) and 800 prompt positions. The second part is the calls after the first edit: 2,898 generated and 966 prompt positions. In all, there are 7,862 training positions. The constant read-out is $q = \mathrm{ridge}(\hat{x} \rightarrow 1)$ with relative penalty $10^{-2}$ on all of them. The always-on edit uses $\mathrm{gate}_j = 4q$. A gated edit fits a class-balanced weighted ridge read-out $r$ (penalty 0.05), with target $+1$ at ON positions and $-1$ at OFF positions. It then sets
+\begin{equation}
+\label{eq:cgate}
+    \mathrm{gate}_j = 4\, \frac{r - \theta\, q}{1 - \theta}, \qquad \theta = 0.3, \qquad \mathrm{up}_j = q, \qquad \mathrm{down}_{:,j} = -c \; \unit(d_l / w_{\mathrm{post}}).
+\end{equation}
+Thus the gate pre-activation is about 4 where $r \cdot \hat{x} = 1$ and negative where $r \cdot \hat{x} < \theta\, (q \cdot \hat{x}) \approx 0.3$. The direction $d_l$ is the explore-more direction of \S\ref{sec:locate}. The size $c$ does not come from Eq.~(\ref{eq:shift}). Instead, bisection sets $c$ so that the exactly recomputed shift of the layer output along $d_l$, averaged over held-out ON positions, equals the target number of class gaps. The four edits are:
+(1) always-on, at 0.125 gaps;
+(2) the before-first-edit gate, at 0.25 gaps: ON at all positions of the first part (3,998 training positions), OFF at generated positions after the first edit (2,898);
+(3) the generated-positions gate, at 0.25 gaps: ON at generated positions of both parts (6,096), OFF at prompt positions (1,766);
+(4) the early-calls gate: ON at generated positions before the first edit with agent-call index $\le 4$ (600), OFF at those with index $\ge 8$ and at generated positions after the first edit (4,896), with a target of 0.3 gaps averaged over its ON positions.
+Prompt positions after the first edit are in neither set of the before-first-edit gate. The early-calls gate uses no prompt positions in its fit. The control keeps the neurons and the constant gate of the always-on edit. It writes a random Gaussian unit direction (seed 7, not orthogonalised against $d_l$) through $1/w_{\mathrm{post}}$. Bisection sets its $c$ so that the mean norm of the change in the layer output equals that of the always-on edit.
+
+\textbf{Measured properties} (from Claude's build logs, on held-out positions). The always-on edit has a mean target of 0.125 gaps and shifts $-0.11$ to $-0.15$ gaps, depending on the position group. The generated-positions gate has held-out AUC 0.961--0.966. It fires on about 82\% of generated and 5--7\% of prompt positions. The early-calls gate (AUC 0.95--0.97) shifts $-0.43$ to $-0.54$ gaps at calls up to 4, $-0.02$ to $-0.04$ at calls 5--7 and 0.000 from call 8. Its 0.3-gap target is the mean over all its ON positions. Claude's random control shifts the explore direction by 0.002--0.007 gaps on average and by at most 0.04 in any position group. Both state gates also fire at prompt positions after the first edit. These positions (966 in the training split) were held out of both fits, and this is where the leak appears. There the before-first-edit gate shifts $-0.19$ to $-0.21$ gaps and the early-calls gate $-0.08$ to $-0.12$. On its held-out ON positions the early-calls gate has mean activation 2.0--2.2 (4.0 at full firing) and exceeds 1 at 55--66\% of them. Thus its realised shift is 0.64--0.71 of Eq.~(\ref{eq:shift}) at the recorded $\beta$ (\S\ref{sec:primitive}).
+
+\textbf{Fit and control notes.} Bisection sizes $c$ on the same held-out split that gives the shifts and AUCs above, so those shifts are in-sample. Training and held-out positions are split by episode, across runs of the same 170 tasks. Each gated fit uses 5,496--7,862 positions, several per decision call, against $n = 2560$ coefficients per read-out, with a ridge penalty. Claude's control matches the always-on edit. GPT's and Gemini's controls (below) match their neuron edits. No control is matched to both gate and norm.
+
+\textbf{GPT and Gemini.} GPT's gates use $\mathrm{gate} = 8\,(q_{\mathrm{event}} - 0.5\, q_{\mathrm{const}})$. One class-balanced ridge solve (penalty $10^{-4}$ of the trace) on all training positions gives both read-outs. For the decision-token gate, the event is the decision token of a call before the first edit (from the first part of the activation set). For the re-check gate, the event is the first generated token after a failed run-command call (from the second part). The write is $\beta \rho \sqrt{n}\, \unit(-d_l / w_{\mathrm{post}})$ divided by the gate's mean activation on training event positions. Here $\beta$ comes from Eq.~(\ref{eq:shift}) for 0.35 (decision-token) or 0.25 (re-check) gaps, capped at 0.35. GPT's rotation edit is a rank-two change to the down projection at layers 12, 16 and 20. GPT's re-check gate detects a thinking start after a tool error with held-out AUC 0.988--0.990. It shifts $-0.21$ to $-0.24$ gaps there, against $-0.005$ to $-0.009$ at other thinking starts. Its decision-token gate has held-out AUC 1.0 for its condition and shifts $-0.32$ to $-0.34$ gaps per layer where it fires. GPT's control (from \texttt{gpt/code/build.py}) keeps the decision-token edit's neurons at layers 18, 20 and 22 and its gate row, up row and $\beta$. It multiplies each coordinate of the down column by a random sign (seed $20261111 + l$). The control is gated, has the same down-column norm, is not orthogonalised to $d_l$ and has no rank-two rotation. Gemini fits $q$ by dual ridge (relative penalty $10^{-3}$) on all training positions of its pre-first-edit activation set. It replaces the exact division $d_l / w_{\mathrm{post}}$ of Eq.~(\ref{eq:write}) by a damped form, $\hat{u} = \unit\!\left(d_l \odot w_{\mathrm{post}} / (w_{\mathrm{post}} \odot w_{\mathrm{post}} + 0.10\, \mathrm{median}(w_{\mathrm{post}}^2))\right)$ with elementwise division, and keeps $\beta$ within 0.017--0.028. Both of its writes add $-\hat{u}$: against the first-edit direction for explore-more, and against the verbose-thinking direction for concise thinking. Its always-on edit writes explore-more at layers 18, 20 and 22 (0.14 gaps) and concise thinking at layers 24, 26 and 28 (0.12 gaps). Its control (from \texttt{build\_damped\_dual\_explore\_concise.py}) keeps the six neurons, the constant gate, the up rows and $\beta$. The control's write direction is $d_l$ with a random sign per coordinate (seed $20261111 + l$), Gram--Schmidt orthogonalised to $d_l$. The control maps it through the same damped inverse and projects it so that its post-normalisation write is exactly orthogonal to $d_l$. Gemini's attention edit attenuates one output direction of the attention output projection per layer by a factor $\gamma = 0.14$--0.16 at eight layers. It changes no MLP weight.
+
+\subsection{Compiling a prompt rule into rank-16 weights}
+\label{app:rule}
+For a rule, let $T_i = h^{\mathrm{rule}}_i - h^{\mathrm{plain}}_i$ be the difference of the layer-18 output with and without the rule in the prompt, at the same call and position. We use 400 logged decisions (312 training, 88 held-out). We fit a linear map $T \approx \hat{x} W$ by ridge regression (dual form, relative penalty $10^{-3}$) from the plain MLP input $\hat{x}$ on the training pairs. We take its top 16 singular triplets, $W \approx \sum_{k=1}^{16} U_k S_k V_k^{\top}$. Here $\hat{x}$ is a row vector, $W \in \mathbb{R}^{n \times n}$, $U_k \in \mathbb{R}^n$ is the input-side (left) and $V_k \in \mathbb{R}^n$ the output-side (right) singular vector, so $\hat{x} W \approx \sum_k (\hat{x} \cdot U_k)\, S_k V_k^{\top} = \hat{x}\, U S V^{\top}$ with $U = [U_1, \dots, U_{16}]$, $S = \mathrm{diag}(S_1, \dots, S_{16})$ and $V = [V_1, \dots, V_{16}]$. We overwrite sixteen quiet neurons (0.12--0.18 of the layer-median score). Neuron $k$ gets
+\begin{equation}
+\label{eq:rule}
+    \mathrm{gate}_k = G\, q, \qquad \mathrm{up}_k = U_k, \qquad \mathrm{down}_{:,k} = t\, \rho\, S_k\, V_k \,/\, \left(s_l\, w_{\mathrm{post}}\, \gelu(G)\right),
+\end{equation}
+with $G = 4$, $q$ the constant read-out, $\rho = 0.081$, $s_l = 0.535$, the division elementwise, and $t$ the dose. Since $\gelu(G\, q \cdot \hat{x}) \approx \gelu(G)$, each neuron is linear in $\hat{x}$. Through the output normalisation, the sixteen neurons shift the layer output by about $t\, \hat{x}\, U S V^{\top} / \sqrt{1 + \beta^2}$ (under the orthogonality assumption of Eq.~\ref{eq:shift}). Here $\beta = \lVert \sum_k a_k\, \mathrm{down}_{:,k} \rVert / \lVert y \rVert$ is the ratio of the added to the natural output norm at that position; equivalently $\beta = \mathrm{rms}(\Delta y)/\mathrm{rms}(y) = \lVert \Delta y \rVert / (\rho\sqrt{n})$, the same convention as Eq.~(\ref{eq:write}). Unlike Eq.~(\ref{eq:write}), no explicit $\sqrt{n}$ appears: the target is a residual-space shift, and its scale, $\sqrt{n}$ included, is absorbed into the singular values $S_k$. Here $\beta$ varies with $\hat{x}$, and so by position, and is not pre-compensated. Held-out $R^2$ for the two rules: one constant direction 0.25 and 0.19; the full ridge map 0.56 and 0.44; its rank-16 truncation 0.53 and 0.41; the realised rank-16 edit at $t = 1$, recomputed through the layer, 0.53 and 0.41. The control keeps neurons, gates, up rows and down-column norms. It gives every write direction the same random sign per dimension and makes it orthogonal to the span of the fitted write directions. The constant-neuron rule edits of \S\ref{sec:negative} instead write the mean shift with one neuron at layer 18 by Eq.~(\ref{eq:write}). The build report gives a held-out AUC of 0.54 for that direction.
